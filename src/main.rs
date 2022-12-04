@@ -54,7 +54,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
             tot_b_reward: 0.0,
         };
         if dag.insert(b.clone(), node).is_some() {
-            panic!("Duplicate MCTS insertion");
+            // this can very rarely happen when self-loop of BoardState exists, because of Pass action.
+            // TODO: is ignoring OK?
         }
     }
     fn expand(rng: &mut SmallRng, dag: &mut HashMap<Board, MCTSNode>, b: &Board) {
@@ -99,12 +100,7 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
             .unwrap()
             .clone()
     }
-    fn select(
-        rng: &mut SmallRng,
-        dag: &mut HashMap<Board, MCTSNode>,
-        b0: &Board,
-        parent: Option<Board>,
-    ) -> Vec<Action> {
+    fn select(rng: &mut SmallRng, dag: &mut HashMap<Board, MCTSNode>, b0: &Board) -> Vec<Action> {
         let mut node = dag.get_mut(b0).expect("Invalid MCTS scan");
         if node.children.is_empty() {
             // not yet expanded node
@@ -123,13 +119,13 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
         if rng.gen::<f32>() < EPS {
             // explore
             let (a, b) = node.children[rng.gen_range(0..node.children.len())].clone();
-            let mut ac_path = select(rng, dag, &b, Some(b0.clone()));
+            let mut ac_path = select(rng, dag, &b);
             ac_path.push(a);
             return ac_path;
         } else {
             // exploit
             let (a, b) = pick_best(dag, b0);
-            let mut ac_path = select(rng, dag, &b, Some(b0.clone()));
+            let mut ac_path = select(rng, dag, &b);
             ac_path.push(a);
             return ac_path;
         }
@@ -143,7 +139,7 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
             break;
         }
 
-        let next_action = select(rng, &mut dag, b, None).last().unwrap().clone();
+        let next_action = select(rng, &mut dag, b).last().unwrap().clone();
         let mut b2 = b.clone();
         b2.apply(&next_action);
         record_reward(&mut dag, &b2, playout_b_reward(rng, &b2));
@@ -179,8 +175,8 @@ fn playout_b_reward(rng: &mut SmallRng, b: &Board) -> f32 {
 
 fn win_rate<Fn1, Fn2>(
     rng: &mut SmallRng,
-    p_black: Fn1,
-    p_white: Fn2,
+    p1: Fn1,
+    p2: Fn2,
     num: usize,
     budget_usec: u64,
 ) -> f32
@@ -188,36 +184,49 @@ where
     Fn1: Fn(&mut SmallRng, &Board, u64) -> Action,
     Fn2: Fn(&mut SmallRng, &Board, u64) -> Action,
 {
-    let mut num_black_win = 0;
+    let mut num_win_p1 = 0;
     let mut num_draw = 0;
-    let mut num_white_win = 0;
+    let mut num_win_p2 = 0;
 
-    for _ in 0..num {
+    for i in 0..num {
+        let p1_is_black = i % 2 == 0;
         let mut b = Board::new();
         for i in 0..100 {
             if let Some(res) = b.is_terminal() {
                 match res {
-                    Cell::Black => num_black_win += 1,
                     Cell::Empty => num_draw += 1,
-                    Cell::White => num_white_win += 1,
+                    Cell::Black => {
+                        if p1_is_black {
+                            num_win_p1 += 1;
+                        } else {
+                            num_win_p2 += 1;
+                        }
+                    },
+                    Cell::White => {
+                        if p1_is_black {
+                            num_win_p2 += 1;
+                        } else {
+                            num_win_p1 += 1;
+                        }
+                    },
                 }
                 break;
             }
 
-            if b.side_black {
-                b.apply(&p_black(rng, &b, budget_usec));
+            if b.side_black == p1_is_black {
+                b.apply(&p1(rng, &b, budget_usec));
             } else {
-                b.apply(&p_white(rng, &b, budget_usec));
+                b.apply(&p2(rng, &b, budget_usec));
             }
         }
     }
-    let win_rate = (num_black_win as f32 + num_draw as f32 * 0.5) / num as f32;
+    let win_rate = (num_win_p1 as f32 + num_draw as f32 * 0.5) / num as f32;
     println!(
-        "black_win_rate={:.1}% (black/draw/white={}/{}/{})",
+        "p1_win_rate={:.1}% (p1/draw/p2={}/{}/{})",
         win_rate * 100.0,
-        num_black_win,
+        num_win_p1,
         num_draw,
-        num_white_win
+        num_win_p2
     );
     win_rate
 }
@@ -256,9 +265,14 @@ fn main() {
             .as_micros() as u64,
     );
 
-    //    play_single(&mut rng, mcts_get_action, random_get_action);
-    win_rate(&mut rng, mcts_get_action, random_get_action, 100, 10000);
+    let mcts_1ms = |rng: &mut SmallRng, b: &Board, _| mcts_get_action(rng, b, 1000);
+    let mcts_10ms = |rng: &mut SmallRng, b: &Board, _| mcts_get_action(rng, b, 10000);
+
+    // mcts(10ms,release) v. mcts(1ms, release): 83%
+
+    win_rate(&mut rng, mcts_10ms, mcts_1ms, 100, 10000);
     //win_rate(&mut rng, random_get_action, mcts_get_action, 1, 10000);
+    //play_single(&mut rng, mcts_get_action, random_get_action, 1000);
 }
 
 // use std::time::Instant;
