@@ -56,6 +56,7 @@ impl Board {
     }
 
     pub fn is_terminal(&self) -> Option<Cell> {
+        // firestorm::profile_fn!(is_terminal);
         if self.possible_put_actions(Cell::Black).is_empty()
             && self.possible_put_actions(Cell::White).is_empty()
         {
@@ -88,7 +89,7 @@ impl Board {
     }
 
     pub fn legal_actions(&self) -> Vec<Action> {
-        firestorm::profile_fn!(legal_actions);
+        // firestorm::profile_fn!(legal_actions);
         let c = if self.side_black {
             Cell::Black
         } else {
@@ -104,6 +105,8 @@ impl Board {
     }
 
     fn possible_put_actions(&self, c: Cell) -> Vec<PutAction> {
+        // firestorm::profile_fn!(possible_put_actions);
+
         let mut actions = vec![];
         for y in 0..B_SIZE {
             for x in 0..B_SIZE {
@@ -185,13 +188,19 @@ impl Board {
     }
 
     pub fn apply(&mut self, action: &Action) {
-        firestorm::profile_fn!(apply);
+        // firestorm::profile_fn!(apply);
 
-        if !self.is_legal(action) {
-            panic!("trying to apply illegal action");
-        }
+        let c = if self.side_black {
+            Cell::Black
+        } else {
+            Cell::White
+        };
 
         if let Action::Put(put) = action {
+            if put.c != c {
+                panic!("trying to apply illegal side");
+            }
+
             self.cells[to_ix(put.x, put.y)] = put.c;
             let mut takes: Vec<usize> = vec![];
             for dy in -1..=1 {
@@ -201,6 +210,9 @@ impl Board {
                     }
                     takes.extend(self.can_take(put, dx, dy).iter());
                 }
+            }
+            if takes.is_empty() {
+                panic!("illegal move (0 stone taken)")
             }
             for ix in takes {
                 self.cells[ix] = put.c;
