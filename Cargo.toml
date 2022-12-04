@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 dfdx = "0.10"
 rand = { version = "0.8", features = ["small_rng"] }
+firestorm = { version="0.5", features=["enable_system_time"] }

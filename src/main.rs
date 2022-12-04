@@ -3,7 +3,7 @@ mod r6;
 use std::{
     collections::HashMap,
     hash::Hash,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH}, fs::File,
 };
 
 use crate::r6::Board;
@@ -11,11 +11,14 @@ use r6::{Action, Cell};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 fn random_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
+    firestorm::profile_fn!(random_get_action);
     let actions = b.legal_actions();
     actions[rng.gen_range(0..actions.len())]
 }
 
 fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
+    firestorm::profile_fn!(mcts_get_action);
+
     let t0 = Instant::now();
 
     const EPS: f32 = 0.1;
@@ -29,6 +32,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
     }
     let mut dag: HashMap<Board, MCTSNode> = HashMap::new();
     fn record_reward(dag: &mut HashMap<Board, MCTSNode>, b: &Board, r_b: f32) {
+        firestorm::profile_fn!(record_reward);
+
         let mut b = b.clone();
         loop {
             match dag.get_mut(&b) {
@@ -47,6 +52,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
         }
     }
     fn insert_empty(dag: &mut HashMap<Board, MCTSNode>, b: &Board, parent: Option<Board>) {
+        firestorm::profile_fn!(insert_empty);
+
         let node = MCTSNode {
             parent: parent.clone(),
             children: vec![],
@@ -59,6 +66,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
         }
     }
     fn expand(rng: &mut SmallRng, dag: &mut HashMap<Board, MCTSNode>, b: &Board) {
+        firestorm::profile_fn!(expand);
+
         let actions = b.legal_actions();
         for a in actions {
             let mut b2 = b.clone();
@@ -81,6 +90,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
         }
     }
     fn pick_best(dag: &HashMap<Board, MCTSNode>, b: &Board) -> (Action, Board) {
+        firestorm::profile_fn!(pick_best);
+
         dag.get(b)
             .unwrap()
             .children
@@ -157,6 +168,8 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
 }
 
 fn playout_b_reward(rng: &mut SmallRng, b: &Board) -> f32 {
+    firestorm::profile_fn!(playout_b_reward);
+
     let mut curr_b = b.clone();
     for i in 0..30 {
         if let Some(res) = curr_b.is_terminal() {
@@ -257,7 +270,7 @@ where
     }
 }
 
-fn main() {
+fn compare() {
     let mut rng = SmallRng::seed_from_u64(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -270,9 +283,17 @@ fn main() {
 
     // mcts(10ms,release) v. mcts(1ms, release): 83%
 
-    win_rate(&mut rng, mcts_10ms, mcts_1ms, 100, 10000);
+    win_rate(&mut rng, mcts_10ms, mcts_1ms, 1, 10000);
+}
+
+fn main() {
+   
     //win_rate(&mut rng, random_get_action, mcts_get_action, 1, 10000);
     //play_single(&mut rng, mcts_get_action, random_get_action, 1000);
+
+    if firestorm::enabled() {
+        firestorm::bench("./flames/", compare).unwrap();
+    }
 }
 
 // use std::time::Instant;

@@ -88,6 +88,7 @@ impl Board {
     }
 
     pub fn legal_actions(&self) -> Vec<Action> {
+        firestorm::profile_fn!(legal_actions);
         let c = if self.side_black {
             Cell::Black
         } else {
@@ -184,6 +185,8 @@ impl Board {
     }
 
     pub fn apply(&mut self, action: &Action) {
+        firestorm::profile_fn!(apply);
+
         if !self.is_legal(action) {
             panic!("trying to apply illegal action");
         }
