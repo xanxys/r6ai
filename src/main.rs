@@ -1,14 +1,208 @@
 mod r6;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::r6::Board;
+use r6::{Action, Cell};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
-fn main() {
-    let mut rng =
-        SmallRng::seed_from_u64(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64);
+fn random_get_action(rng: &mut SmallRng, b: &Board) -> Action {
+    let actions = b.legal_actions();
+    actions[rng.gen_range(0..actions.len())]
+}
 
+fn mcts_get_action(rng: &mut SmallRng, b: &Board) -> Action {
+    const EPS: f32 = 0.1;
+    const MIN_OBS_TO_EXPAND: i32 = 10;
+    const NUM_ITER: usize = 100;
+
+    struct MCTSNode {
+        parent: Option<Board>,
+        children: Vec<(Action, Board)>,
+        num_obs: i32,
+        tot_b_reward: f32,
+    }
+    let mut dag: HashMap<Board, MCTSNode> = HashMap::new();
+    fn record_reward(dag: &mut HashMap<Board, MCTSNode>, b: &Board, r_b: f32) {
+        let mut b = b.clone();
+        loop {
+            match dag.get_mut(&b) {
+                Some(node) => {
+                    node.num_obs += 1;
+                    node.tot_b_reward += r_b;
+                    match &node.parent {
+                        Some(p) => b = p.clone(),
+                        None => break,
+                    }
+                }
+                None => {
+                    dag.insert(
+                        b.clone(),
+                        MCTSNode {
+                            parent: None,
+                            children: vec![],
+                            num_obs: 1,
+                            tot_b_reward: r_b,
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    fn insert_and_expand(rng: &mut SmallRng, dag: &mut HashMap<Board, MCTSNode>, b: &Board) {
+        let actions = b.legal_actions();
+        let mut node = MCTSNode {
+            parent: None,
+            children: vec![],
+            num_obs: 0,
+            tot_b_reward: 0.0,
+        };
+        for a in actions {
+            let mut b2 = b.clone();
+            b2.apply(&a);
+            node.children.push((a, b2));
+        }
+
+        dag.insert(b.clone(), node);
+        let children_bs: Vec<Board> = dag
+            .get(b)
+            .unwrap()
+            .children
+            .iter()
+            .map(|(_, b)| b.clone())
+            .collect();
+        for b in children_bs.iter() {
+            record_reward(dag, b, playout_b_reward(rng, b));
+        }
+    }
+    fn pick_best(dag: &HashMap<Board, MCTSNode>, b: &Board) -> (Action, Board) {
+        dag.get(b)
+            .unwrap()
+            .children
+            .iter()
+            .max_by(|(_, b1), (_, b2)| {
+                let n1 = dag.get(&b1).unwrap();
+                let n2 = dag.get(&b2).unwrap();
+                let r1 = n1.tot_b_reward / n1.num_obs as f32;
+                let r2 = n2.tot_b_reward / n2.num_obs as f32;
+
+                if b.side_black {
+                    r1.partial_cmp(&r2).unwrap() // black's turn -> maximize black reward
+                } else {
+                    r2.partial_cmp(&r1).unwrap() // white's turn -> minimize black reward
+                }
+            })
+            .unwrap()
+            .clone()
+    }
+    fn select(rng: &mut SmallRng, dag: &mut HashMap<Board, MCTSNode>, b: &Board) -> Vec<Action> {
+        let mut node = dag.get_mut(b).expect("Invalid MCTS scan");
+        if node.children.is_empty() {
+            // not yet expanded node
+            if node.num_obs < MIN_OBS_TO_EXPAND {
+                return vec![];
+            } else {
+                // ok to expand now
+                insert_and_expand(rng, dag, b);
+                node = dag.get_mut(b).unwrap();
+            }
+        }
+        if node.children.is_empty() {
+            panic!("MCTS #children must be >0");
+        }
+
+        if rng.gen::<f32>() < EPS {
+            // explore
+            let (a, b) = node.children[rng.gen_range(0..node.children.len())].clone();
+            let mut ac_path = select(rng, dag, &b);
+            ac_path.push(a);
+            return ac_path;
+        } else {
+            // exploit
+            let (a, b) = pick_best(dag, b);
+            let mut ac_path = select(rng, dag, &b);
+            ac_path.push(a);
+            return ac_path;
+        }
+    }
+
+    insert_and_expand(rng, &mut dag, b);
+    for i in 0..NUM_ITER {
+        let next_action = select(rng, &mut dag, b).last().unwrap().clone();
+        let mut b2 = b.clone();
+        b2.apply(&next_action);
+        record_reward(&mut dag, &b2, playout_b_reward(rng, &b2));
+    }
+
+    let (a, _) = pick_best(&dag, b);
+    a
+}
+
+fn playout_b_reward(rng: &mut SmallRng, b: &Board) -> f32 {
+    let mut curr_b = b.clone();
+    for i in 0..30 {
+        if let Some(res) = curr_b.is_terminal() {
+            match res {
+                Cell::Black => return 1.0,
+                Cell::Empty => return 0.5,
+                Cell::White => return 0.0,
+            }
+        }
+        curr_b.apply(&random_get_action(rng, &curr_b));
+    }
+    return 0.5;
+}
+
+// reward value is +1 for black win, -1 for white win, 0.5 for draw.
+
+fn win_rate<Fn1, Fn2>(rng: &mut SmallRng, p_black: Fn1, p_white: Fn2, num: usize) -> f32
+where
+    Fn1: Fn(&mut SmallRng, &Board) -> Action,
+    Fn2: Fn(&mut SmallRng, &Board) -> Action,
+{
+    let mut num_black_win = 0;
+    let mut num_draw = 0;
+    let mut num_white_win = 0;
+
+    for _ in 0..num {
+        let mut b = Board::new();
+        for i in 0..100 {
+            if let Some(res) = b.is_terminal() {
+                match res {
+                    Cell::Black => num_black_win += 1,
+                    Cell::Empty => num_draw += 1,
+                    Cell::White => num_white_win += 1,
+                }
+                break;
+            }
+
+            if b.side_black {
+                b.apply(&p_black(rng, &b));
+            } else {
+                b.apply(&p_white(rng, &b));
+            }
+        }
+    }
+    let win_rate = (num_black_win as f32 + num_draw as f32 * 0.5) / num as f32;
+    println!(
+        "black_win_rate={:.1}% (black/draw/white={}/{}/{})",
+        win_rate * 100.0,
+        num_black_win,
+        num_draw,
+        num_white_win
+    );
+    win_rate
+}
+
+fn play_single<Fn1, Fn2>(rng: &mut SmallRng, p_black: Fn1, p_white: Fn2)
+where
+    Fn1: Fn(&mut SmallRng, &Board) -> Action,
+    Fn2: Fn(&mut SmallRng, &Board) -> Action,
+{
     let mut b = Board::new();
 
     for i in 0..100 {
@@ -18,12 +212,29 @@ fn main() {
             break;
         }
 
-        let actions = b.legal_actions();
-        let action = actions[rng.gen_range(0..actions.len())];
-        println!("chosen: {:?} / bf={}", action, actions.len());
+        let branching_factor = b.legal_actions().len();
 
+        let action = if b.side_black {
+            p_black(rng, &b)
+        } else {
+            p_white(rng, &b)
+        };
+        println!("chosen: {:?} / bf={}", action, branching_factor);
         b.apply(&action);
     }
+}
+
+fn main() {
+    let mut rng = SmallRng::seed_from_u64(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64,
+    );
+
+//    play_single(&mut rng, mcts_get_action, random_get_action);
+    //win_rate(&mut rng, mcts_get_action, random_get_action, 10);
+    win_rate(&mut rng, random_get_action, mcts_get_action, 10);
 }
 
 // use std::time::Instant;

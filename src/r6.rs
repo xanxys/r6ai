@@ -2,7 +2,7 @@ use std::fmt::{self, Display, Formatter};
 
 pub const B_SIZE: usize = 6;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Cell {
     Empty,
     Black,
@@ -17,6 +17,7 @@ fn opposite(c: Cell) -> Cell {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Board {
     pub side_black: bool,
     pub cells: Vec<Cell>,
