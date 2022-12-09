@@ -9,8 +9,11 @@ use std::{
 
 use crate::r6::Board;
 use dfdx::{
-    prelude::{HasArrayData, Linear, Module, ReLU, ResetParams, Sigmoid, SplitInto},
-    tensor::{Tensor1D, TensorCreator},
+    prelude::{
+        mse_loss, Adam, AdamConfig, HasArrayData, Linear, Module, Optimizer, OwnedTape, ReLU,
+        ResetParams, Sigmoid, SplitInto, cross_entropy_with_logits_loss,
+    },
+    tensor::{Tensor0D, Tensor1D, TensorCreator},
 };
 use r6::{to_ix, Action, Cell, PutAction, B_SIZE};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -163,12 +166,12 @@ fn mcts_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64) -> Action {
     }
 
     let (a, _) = pick_best(&dag, b);
-    println!(
-        "MCTS: #nodes={} / #obs={} / #iter={}",
-        dag.len(),
-        dag.get(b).unwrap().num_obs,
-        num_iter
-    );
+    // println!(
+    //     "MCTS: #nodes={} / #obs={} / #iter={}",
+    //     dag.len(),
+    //     dag.get(b).unwrap().num_obs,
+    //     num_iter
+    // );
     a
 }
 
@@ -221,7 +224,30 @@ fn encode_board(b: &Board) -> Tensor1D<STATE_SIZE> {
     s
 }
 
-fn decode_legal_action(b: &Board, p: &Tensor1D<ACTION_SIZE>) -> Vec<(Action, f32)> {
+fn encode_action_policy(pol: &[(Action, f32)]) -> Tensor1D<ACTION_SIZE> {
+    let mut ap: Tensor1D<ACTION_SIZE> = TensorCreator::zeros();
+    let mut apd = ap.mut_data();
+
+    for (action, prob) in pol {
+        match action {
+            Action::Put(PutAction { x, y, .. }) => {
+                apd[to_ix(*x, *y)] = *prob;
+            }
+            Action::Pass => {
+                apd[36] = *prob;
+            }
+        }
+    }
+    ap
+}
+
+fn encode_reward(r: f32) -> Tensor1D<1> {
+    let mut t: Tensor1D<1> = TensorCreator::zeros();
+    t.mut_data()[0] = r;
+    t
+}
+
+fn decode_action(b: &Board, p: &Tensor1D<ACTION_SIZE>) -> Vec<(Action, f32)> {
     let probs = p.clone().log_softmax();
     let mut actions = Vec::with_capacity(ACTION_SIZE);
     for y in 0..B_SIZE {
@@ -307,7 +333,7 @@ fn az_get_action(
         // Evaluate PV network.
         let in_s = encode_board(b);
         let (out_p, _) = pv.forward(in_s);
-        let actions = decode_legal_action(b, &out_p);
+        let actions = decode_action(b, &out_p);
 
         let legal_actions = b.legal_actions();
         let p_sum_legal: f32 = actions
@@ -413,12 +439,12 @@ fn az_get_action(
     }
 
     let (a, _) = pick_best(&dag, b);
-    println!(
-        "AZ: #nodes={} / #obs={} / #iter={}",
-        dag.len(),
-        dag.get(b).unwrap().num_obs,
-        num_iter
-    );
+    // println!(
+    //     "AZ: #nodes={} / #obs={} / #iter={}",
+    //     dag.len(),
+    //     dag.get(b).unwrap().num_obs,
+    //     num_iter
+    // );
     a
 }
 
@@ -519,7 +545,12 @@ where
     }
 }
 
-fn collect_az_samples(rng: &mut SmallRng, num: usize, budget_usec: u64, pv: &PVNetwork) -> Vec<AZSample> {
+fn collect_az_samples(
+    rng: &mut SmallRng,
+    num: usize,
+    budget_usec: u64,
+    pv: &PVNetwork,
+) -> Vec<AZSample> {
     let mut samples = vec![];
     for i in 0..num {
         let mut b = Board::new();
@@ -551,6 +582,44 @@ fn collect_az_samples(rng: &mut SmallRng, num: usize, budget_usec: u64, pv: &PVN
     samples
 }
 
+fn train_az(rng: &mut SmallRng, pv: &PVNetwork, budget_usec: u64, num_battles: usize) -> PVNetwork {
+    let samples = collect_az_samples(rng, num_battles, budget_usec, &pv);
+    println!("{} AZ samples collected", samples.len());
+
+    let mut opti = Adam::new(AdamConfig {
+        lr: 1e-2,
+        weight_decay: None,
+        betas: [0.9, 0.999],
+        eps: 1e-10,
+    });
+
+    let mut pv_training: PVNetwork = pv.clone();
+
+    let start = Instant::now();
+    let mut last_updated = Instant::now();
+    for _i_epoch in 0..100 {
+        // TODO: batching?
+        for s in &samples {
+            let s_in: Tensor1D<STATE_SIZE> = encode_board(&s.state);
+            let p_true: Tensor1D<ACTION_SIZE> = encode_action_policy(&s.final_policy);
+            let v_true: Tensor1D<1> = encode_reward(s.reward_b);
+            let (p_pred, v_pred) = pv_training.forward(s_in.trace());
+
+            let loss = mse_loss(v_pred, v_true) + cross_entropy_with_logits_loss(p_pred.traced(), p_true);
+            let loss_v = *loss.data();
+            let gradients = loss.backward();
+            opti.update(&mut pv_training, gradients)
+                .expect("Unused params");
+
+            if last_updated.elapsed().as_secs_f32() > 1.0 {
+                println!("loss={:#.3} @ epoch={}, t={:#.1}", loss_v, _i_epoch, start.elapsed().as_secs_f32());
+                last_updated = Instant::now();
+            }
+        }
+    }
+    pv_training
+}
+
 fn compare() {
     let mut rng = SmallRng::seed_from_u64(
         SystemTime::now()
@@ -562,10 +631,6 @@ fn compare() {
     let mut pv = PVNetwork::default();
     pv.reset_params(&mut rng);
 
-    let samples = collect_az_samples(&mut rng, 10, 1000, &pv);
-    println!("{} AZ samples collected", samples.len());
-
-
     let mcts_1ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 1000);
     let mcts_10ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 10_000);
     let az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| {
@@ -576,8 +641,19 @@ fn compare() {
         };
         az_get_action(rng, b, 1000, &pv, &mut dummy_sample)
     };
+    win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
 
-    //win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
+    pv = train_az(&mut rng, &pv, 1000, 100);
+    let post_az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| {
+        let mut dummy_sample = AZSample {
+            state: Board::new(),
+            final_policy: vec![],
+            reward_b: 0.5,
+        };
+        az_get_action(rng, b, 1000, &pv, &mut dummy_sample)
+    };
+
+    win_rate(&mut rng, post_az_1ms, mcts_1ms, 5, 10000);
 }
 
 fn main() {
