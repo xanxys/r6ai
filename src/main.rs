@@ -183,6 +183,12 @@ type PVNetwork = (
     SplitInto<(Linear<32, ACTION_SIZE>, (Linear<32, 1>, Sigmoid))>,
 );
 
+struct AZSample {
+    state: Board,
+    final_policy: Vec<(Action, f32)>,
+    reward_b: f32,
+}
+
 fn encode_board(b: &Board) -> Tensor1D<STATE_SIZE> {
     let mut s: Tensor1D<STATE_SIZE> = TensorCreator::zeros();
     let mut sd = s.mut_data();
@@ -238,7 +244,13 @@ fn decode_legal_action(b: &Board, p: &Tensor1D<ACTION_SIZE>) -> Vec<(Action, f32
     actions
 }
 
-fn az_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64, pv: &PVNetwork) -> Action {
+fn az_get_action(
+    rng: &mut SmallRng,
+    b: &Board,
+    budget_usec: u64,
+    pv: &PVNetwork,
+    sample: &mut AZSample,
+) -> Action {
     firestorm::profile_fn!(az_get_action);
 
     let t0 = Instant::now();
@@ -380,6 +392,15 @@ fn az_get_action(rng: &mut SmallRng, b: &Board, budget_usec: u64, pv: &PVNetwork
     let mut num_iter = 0;
     loop {
         if t0.elapsed().as_micros() as u64 >= budget_usec {
+            sample.state = b.clone();
+
+            let mut pol = vec![];
+            let num_obs = dag.get(&b).unwrap().num_obs;
+            for (a, ch_b) in dag.get(&b).unwrap().children.iter() {
+                let ch_num_obs = dag.get(&ch_b).unwrap().num_obs;
+                pol.push((a.clone(), ch_num_obs as f32 / num_obs as f32));
+            }
+            sample.final_policy = pol;
             break;
         }
 
@@ -498,6 +519,38 @@ where
     }
 }
 
+fn collect_az_samples(rng: &mut SmallRng, num: usize, budget_usec: u64, pv: &PVNetwork) -> Vec<AZSample> {
+    let mut samples = vec![];
+    for i in 0..num {
+        let mut b = Board::new();
+
+        let mut battle_samples: Vec<AZSample> = vec![];
+        for i in 0..100 {
+            if let Some(res) = b.is_terminal() {
+                let reward_b = match res {
+                    Cell::Empty => 0.5,
+                    Cell::Black => 1.0,
+                    Cell::White => 0.0,
+                };
+                for s in battle_samples.iter_mut() {
+                    s.reward_b = reward_b;
+                }
+                samples.extend(battle_samples);
+                break;
+            }
+
+            let mut sample = AZSample {
+                state: b.clone(),
+                final_policy: vec![],
+                reward_b: 0.5,
+            };
+            b.apply(&az_get_action(rng, &b, budget_usec, pv, &mut sample));
+            battle_samples.push(sample);
+        }
+    }
+    samples
+}
+
 fn compare() {
     let mut rng = SmallRng::seed_from_u64(
         SystemTime::now()
@@ -509,11 +562,22 @@ fn compare() {
     let mut pv = PVNetwork::default();
     pv.reset_params(&mut rng);
 
-    let mcts_1ms = |rng: &mut SmallRng, b: &Board, _| mcts_get_action(rng, b, 1000);
-    //let mcts_10ms = |rng: &mut SmallRng, b: &Board, _| mcts_get_action(rng, b, 10_000);
-    let az_1ms = |rng: &mut SmallRng, b: &Board, _| az_get_action(rng, b, 1000, &pv);
+    let samples = collect_az_samples(&mut rng, 10, 1000, &pv);
+    println!("{} AZ samples collected", samples.len());
 
-    win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
+
+    let mcts_1ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 1000);
+    let mcts_10ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 10_000);
+    let az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| {
+        let mut dummy_sample = AZSample {
+            state: Board::new(),
+            final_policy: vec![],
+            reward_b: 0.5,
+        };
+        az_get_action(rng, b, 1000, &pv, &mut dummy_sample)
+    };
+
+    //win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
 }
 
 fn main() {
