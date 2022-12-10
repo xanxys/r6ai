@@ -154,7 +154,7 @@ impl Board {
         let mut may_take = vec![];
         let mut mode = Mode::Init;
 
-        for i in 0..B_SIZE - 1 {
+        for _i in 0..B_SIZE - 1 {
             if cx < 0 || cx >= B_SIZE as i32 || cy < 0 || cy >= B_SIZE as i32 {
                 return vec![];
             }
