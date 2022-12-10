@@ -359,7 +359,7 @@ pub fn train_az(
 
     let mut recent_tot_loss = 0.0;
     let mut recent_count = 0;
-    for _i_epoch in 0..100 {
+    for _i_epoch in 0..50 {
         for s in &samples {
             let s_in: Tensor1D<STATE_SIZE> = encode_board(&s.state);
             let p_true: Tensor1D<ACTION_SIZE> = encode_action_policy(&s.final_policy);
@@ -376,7 +376,7 @@ pub fn train_az(
             recent_tot_loss += loss_v;
             recent_count += 1;
 
-            if last_updated.elapsed().as_secs_f32() > 0.5 {
+            if last_updated.elapsed().as_secs_f32() > 2.5 {
                 println!(
                     "avg loss={:#.3} / sampl/sec={:#.1} @ epoch={}, t={:#.1}",
                     recent_tot_loss / recent_count as f32,

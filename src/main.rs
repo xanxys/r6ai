@@ -99,21 +99,28 @@ fn compare() {
             .as_micros() as u64,
     );
 
-    let mut pv = az_init(&mut rng);
-
     let mcts_1ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 1000);
     let mcts_10ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 10_000);
-    let az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| az_get_action(rng, b, 1000, &pv);
-    win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
 
-    let pv_new = train_az(&mut rng, &pv, 1000, 100);
-    let post_az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| az_get_action(rng, b, 1000, &pv_new);
+    let mut pv = az_init(&mut rng);
+    for i in 0..10 {
+        println!("AZ Training Session {}", i);
+        let pv_new = train_az(&mut rng, &pv, 1000, 100);
 
-    println!("AZ(new) vs MCTS:");
-    win_rate(&mut rng, post_az_1ms, mcts_1ms, 5, 10000);
+        let az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| az_get_action(rng, b, 1000, &pv);
+        let post_az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| az_get_action(rng, b, 1000, &pv_new);
+    
+        println!("AZ(old) vs MCTS:");
+        win_rate(&mut rng, az_1ms, mcts_1ms, 10, 10000);
+        println!("AZ(new) vs MCTS:");
+        win_rate(&mut rng, post_az_1ms, mcts_1ms, 10, 10000);
+        println!("AZ(new) vs AZ(old):");
+        let az_comp = win_rate(&mut rng, post_az_1ms, az_1ms, 10, 10000);
 
-    println!("AZ(new) vs AZ(old):");
-    win_rate(&mut rng, post_az_1ms, az_1ms, 5, 10000);
+        if az_comp > 0.5 {
+            pv = pv_new;
+        }
+    }
 }
 
 fn main() {
