@@ -177,11 +177,11 @@ const STATE_SIZE: usize = 3 * 36 + 2; // cell (E, B, W) x 6^2 + curr_side (B, W)
 const ACTION_SIZE: usize = 36 + 1; // put & pass
 
 type PVNetwork = (
-    (Linear<STATE_SIZE, 32>, ReLU),
-    (Linear<32, 32>, ReLU),
+    (Linear<STATE_SIZE, 100>, ReLU),
+    (Linear<100, 100>, ReLU),
     // selector: logits for action (put: 36, pass: 1)
     // value: 0~1 expected final value
-    SplitInto<(Linear<32, ACTION_SIZE>, (Linear<32, 1>, Sigmoid))>,
+    SplitInto<(Linear<100, ACTION_SIZE>, (Linear<100, 1>, Sigmoid))>,
 );
 
 struct AZSample {
@@ -554,7 +554,7 @@ fn collect_az_samples(
         let mut b = Board::new();
 
         let mut battle_samples: Vec<AZSample> = vec![];
-        for i in 0..100 {
+        for i in 0..50 {
             if let Some(res) = b.is_terminal() {
                 let reward_b = match res {
                     Cell::Empty => 0.5,
@@ -581,11 +581,12 @@ fn collect_az_samples(
 }
 
 fn train_az(rng: &mut SmallRng, pv: &PVNetwork, budget_usec: u64, num_battles: usize) -> PVNetwork {
+    println!("Self play for {} battles / {} usec", num_battles, budget_usec);
     let samples = collect_az_samples(rng, num_battles, budget_usec, &pv);
     println!("{} AZ samples collected", samples.len());
 
     let mut opti = Adam::new(AdamConfig {
-        lr: 1e-2,
+        lr: 1e-3,
         weight_decay: None,
         betas: [0.9, 0.999],
         eps: 1e-10,
@@ -595,8 +596,10 @@ fn train_az(rng: &mut SmallRng, pv: &PVNetwork, budget_usec: u64, num_battles: u
 
     let start = Instant::now();
     let mut last_updated = Instant::now();
+
+    let mut recent_tot_loss = 0.0;
+    let mut recent_count = 0;
     for _i_epoch in 0..100 {
-        // TODO: batching?
         for s in &samples {
             let s_in: Tensor1D<STATE_SIZE> = encode_board(&s.state);
             let p_true: Tensor1D<ACTION_SIZE> = encode_action_policy(&s.final_policy);
@@ -610,14 +613,21 @@ fn train_az(rng: &mut SmallRng, pv: &PVNetwork, budget_usec: u64, num_battles: u
             opti.update(&mut pv_training, gradients)
                 .expect("Unused params");
 
-            if last_updated.elapsed().as_secs_f32() > 1.0 {
+            recent_tot_loss += loss_v;
+            recent_count +=1;
+
+            if last_updated.elapsed().as_secs_f32() > 0.5 {
                 println!(
-                    "loss={:#.3} @ epoch={}, t={:#.1}",
-                    loss_v,
+                    "avg loss={:#.3} / sampl/sec={:#.1} @ epoch={}, t={:#.1}",
+                    recent_tot_loss / recent_count as f32,
+                    recent_count as f32 / last_updated.elapsed().as_secs_f32(),
                     _i_epoch,
                     start.elapsed().as_secs_f32()
                 );
                 last_updated = Instant::now();
+
+                recent_tot_loss = 0.0;
+                recent_count = 0;
             }
         }
     }
@@ -647,24 +657,28 @@ fn compare() {
     };
     win_rate(&mut rng, az_1ms, mcts_1ms, 5, 10000);
 
-    pv = train_az(&mut rng, &pv, 1000, 100);
+    let pv_new = train_az(&mut rng, &pv, 1000, 100);
     let post_az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| {
         let mut dummy_sample = AZSample {
             state: Board::new(),
             final_policy: vec![],
             reward_b: 0.5,
         };
-        az_get_action(rng, b, 1000, &pv, &mut dummy_sample)
+        az_get_action(rng, b, 1000, &pv_new, &mut dummy_sample)
     };
 
+    println!("AZ(new) vs MCTS:");
     win_rate(&mut rng, post_az_1ms, mcts_1ms, 5, 10000);
+
+    println!("AZ(new) vs AZ(old):");
+    win_rate(&mut rng, post_az_1ms, az_1ms, 5, 10000);
 }
 
 fn main() {
     //win_rate(&mut rng, random_get_action, mcts_get_action, 1, 10000);
     //play_single(&mut rng, mcts_get_action, random_get_action, 1000);
 
-    if firestorm::enabled() {
-        firestorm::bench("./flames/", compare).unwrap();
-    }
+    firestorm::clear();
+    compare();
+    firestorm::save("./flames/").unwrap();
 }
