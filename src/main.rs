@@ -8,6 +8,7 @@ use crate::{
     az::{az_init, train_az, az_get_action},
     r6::Board, baseline::mcts_get_action,
 };
+use dfdx::prelude::{SaveToNpz, LoadFromNpz};
 use r6::{Action, Cell};
 use rand::{rngs::SmallRng, SeedableRng};
 
@@ -92,6 +93,8 @@ where
 }
 
 fn compare() {
+    const NN_PATH: &str = "./az_pv.npz";
+
     let mut rng = SmallRng::seed_from_u64(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -103,8 +106,13 @@ fn compare() {
     let mcts_10ms = |rng: &mut SmallRng, b: &Board, _: u64| mcts_get_action(rng, b, 10_000);
 
     let mut pv = az_init(&mut rng);
+    match pv.load(NN_PATH) {
+        Ok(_) => println!("Loaded NN from {}", NN_PATH),
+        Err(e) => println!("Failed to load NN: {}", e),
+    }
+
     for i in 0..10 {
-        println!("AZ Training Session {}", i);
+        println!("------- AZ Training Session {}", i);
         let pv_new = train_az(&mut rng, &pv, 1000, 100);
 
         let az_1ms = |rng: &mut SmallRng, b: &Board, _: u64| az_get_action(rng, b, 1000, &pv);
@@ -119,6 +127,11 @@ fn compare() {
 
         if az_comp > 0.5 {
             pv = pv_new;
+        }
+
+        match pv.save(NN_PATH) {
+            Ok(_) => println!("Saved NN to {}", NN_PATH),
+            Err(e) => println!("Failed to save NN: {}", e),
         }
     }
 }

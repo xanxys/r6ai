@@ -5,7 +5,7 @@ use dfdx::{
     },
     tensor::{Tensor1D, TensorCreator},
 };
-use rand::rngs::SmallRng;
+use rand::{rngs::SmallRng, Rng};
 use std::{
     collections::HashMap,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -129,6 +129,7 @@ fn az_get_action_sample(
     let t0 = Instant::now();
 
     const W_NET: f32 = 0.3;
+    const EPS: f32 = 0.1;
     const MIN_OBS_TO_EXPAND: i32 = 10;
 
     struct MCTSNode {
@@ -254,10 +255,19 @@ fn az_get_action_sample(
             panic!("MCTS #children must be >0");
         }
 
-        let (a, b) = pick_best(dag, b0);
-        let mut ac_path = select(rng, dag, &b, pv);
-        ac_path.push(a);
-        return ac_path;
+        if rng.gen::<f32>() < EPS {
+            // explore
+            let (a, b) = node.children[rng.gen_range(0..node.children.len())].clone();
+            let mut ac_path = select(rng, dag, &b, pv);
+            ac_path.push(a);
+            return ac_path;
+        } else {
+            // exploit
+            let (a, b) = pick_best(dag, b0);
+            let mut ac_path = select(rng, dag, &b, pv);
+            ac_path.push(a);
+            return ac_path;
+        }
     }
 
     insert_empty(&mut dag, b, None);
